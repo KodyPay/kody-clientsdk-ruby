@@ -1,5 +1,10 @@
 # Kody API - Ruby SDK
 
+[![Gem Version](https://badge.fury.io/rb/kody-clientsdk-ruby.svg)](https://badge.fury.io/rb/kody-clientsdk-ruby)
+[![Downloads](https://img.shields.io/gem/dt/kody-clientsdk-ruby.svg)](https://rubygems.org/gems/kody-clientsdk-ruby)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Ruby](https://img.shields.io/badge/ruby-%3E%3D%202.6.10-red.svg)](https://www.ruby-lang.org/)
+
 This guide provides an overview of using the Kody API and its reference documentation.
 
 - [Client Libraries](#client-libraries)
