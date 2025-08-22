@@ -1,0 +1,249 @@
+name: Ruby SDK Build & Release
+
+permissions:
+  contents: write
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      kp_tag:
+        description: 'Optional tag for kp-protocols-clientsdk'
+        required: false
+        default: ''
+
+
+jobs:
+  tagging:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+    steps:
+      - name: Determine version tag from kp-protocols-clientsdk
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.kp_tag }}" ]; then
+             version_tag=${{ github.event.inputs.kp_tag }}
+          else
+            git clone --branch main https://github.com/KodyPay/kp-protocols-clientsdk.git proto-repo
+            cd proto-repo
+            version_tag=$(git describe --tags --exact-match HEAD 2>/dev/null || echo "")
+          fi
+          if [[ -z "${version_tag}" ]]; then
+            echo "No tag found on the head commit of kp-protocols-clientsdk repo. Failing the action."
+            exit 1
+          else
+            echo "tag=${version_tag}" >> $GITHUB_OUTPUT
+            echo "version=${version_tag#v}" >> $GITHUB_OUTPUT
+            if [[ "${version_tag}" == *-* ]]; then echo "prerelease=true" >> $GITHUB_OUTPUT; else echo "prerelease=false" >> $GITHUB_OUTPUT; fi
+          fi
+
+  build:
+    needs:
+      - tagging
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Clone proto repository
+        run: |
+          git clone https://github.com/KodyPay/kp-protocols-clientsdk.git proto-repo
+          cd proto-repo || { echo "Failed to change directory to proto-repo"; exit 1; }
+          git checkout tags/${{ needs.tagging.outputs.tag }} -b temp-branch || { echo "Failed to checkout tag ${{ needs.tagging.outputs.tag }}"; exit 1; }
+          cd ..
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+          bundler-cache: true
+
+      - name: Move proto files
+        run: |
+          cp -R proto-repo/src/main/proto ./proto
+          rm -rf proto-repo
+
+      - name: Update version in version.rb
+        run: |
+          sed -i "s/VERSION = \".*\"/VERSION = \"${{ needs.tagging.outputs.version }}\"/" lib/kody/version.rb
+
+      - name: Generate gRPC Ruby files
+        run: |
+          echo "🔧 Generating gRPC files for all KodyPay services..."
+          
+          # Find all .proto files automatically
+          proto_files=$(find ./proto -name "*.proto" -type f)
+          echo "📄 Found proto files:"
+          echo "$proto_files"
+          
+          # Generate all proto files at once
+          mkdir -p lib/generated
+          bundle exec grpc_tools_ruby_protoc -I./proto --ruby_out=./lib/generated --grpc_out=./lib/generated $proto_files
+          
+          echo "📁 Moving all generated files to lib root..."
+          
+          # Copy all generated _pb.rb files to lib root (flattened structure)
+          find lib/generated -name "*_pb.rb" -exec basename {} \; | while read filename; do
+            # Find the file and copy it to lib root
+            find lib/generated -name "$filename" -exec cp {} "lib/$filename" \;
+          done
+          
+          # Copy all generated _services_pb.rb files to lib root
+          find lib/generated -name "*_services_pb.rb" -exec basename {} \; | while read filename; do
+            # Find the file and copy it to lib root
+            find lib/generated -name "$filename" -exec cp {} "lib/$filename" \;
+          done
+          
+          echo "🔧 Fixing require paths in service files..."
+          # Fix all require statements to use relative paths
+          find lib -name "*_services_pb.rb" -exec sed -i -E 's|require ['"'"'"].*?/([^/'"'"'"]+)_pb['"'"'"]|require_relative "\1_pb"|g' {} \;
+          
+          # Clean up
+          rm -rf lib/generated
+          rm -rf proto
+          
+          # Add all generated files to git so they're included in the gem
+          echo "📝 Adding all generated files to git..."
+          git add lib/*_pb.rb lib/*_services_pb.rb 2>/dev/null || echo "No protobuf files to add"
+          
+          # Verify generated files
+          echo "✅ All generated files:"
+          ls -la lib/*_pb.rb lib/*_services_pb.rb 2>/dev/null | wc -l | xargs echo "Total files:"
+          ls -la lib/*_pb.rb lib/*_services_pb.rb 2>/dev/null | head -10
+          
+          echo "🔍 Sample require statements:"
+          find lib -name "*_services_pb.rb" -exec grep -l "require_relative" {} \; | head -3 | while read file; do
+            echo "=== $file ==="
+            grep "require" "$file" | head -2
+          done
+
+      - name: Run tests
+        run: bundle exec rspec
+
+      - name: Build gem
+        run: bundle exec rake build
+
+      - name: Verify gem build
+        run: |
+          echo "📦 Verifying built gem..."
+          ls -la pkg/
+          
+          echo "🔍 Checking gem contents..."
+          gem contents pkg/kody-clientsdk-ruby-*.gem || echo "Note: gem contents requires gem to be installed"
+          
+          echo "📋 Gem specification:"
+          gem specification pkg/kody-clientsdk-ruby-*.gem || echo "Note: gem specification requires gem to be installed"
+          
+          echo "✅ Gem built successfully!"
+
+      - name: Test gem installation
+        run: |
+          echo "🧪 Testing gem installation..."
+          # First install dependencies that our gem needs
+          gem install grpc google-protobuf
+          
+          # Now install our gem locally
+          gem install pkg/kody-clientsdk-ruby-*.gem --local
+          
+          echo "🔬 Testing require 'kody'..."
+          ruby -e "require 'kody'; puts 'Kody::VERSION = ' + Kody::VERSION"
+          
+          echo "✅ Gem installation test passed!"
+
+      - name: Upload gem artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kody-clientsdk-ruby
+          path: pkg/*.gem
+
+  publish:
+    needs:
+      - tagging
+      - build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download gem artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: kody-clientsdk-ruby
+          path: pkg
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+
+      - name: Publish to RubyGems
+        env:
+          GEM_HOST_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
+        run: |
+          echo "🚀 Publishing to RubyGems..."
+          gem push pkg/*.gem
+          echo "✅ Successfully published to RubyGems!"
+
+  release:
+    needs:
+      - tagging
+      - build
+      - publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download gem artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: kody-clientsdk-ruby
+          path: release
+
+      - name: Create GitHub Release with gem
+        uses: ncipollo/release-action@v1.14.0
+        with:
+          name: "KodyPay Ruby SDK ${{ needs.tagging.outputs.tag }}"
+          tag: "${{ needs.tagging.outputs.tag }}"
+          body: |
+            ## KodyPay Ruby SDK ${{ needs.tagging.outputs.tag }}
+            
+            🚀 **Installation:**
+            ```bash
+            gem install kody-clientsdk-ruby
+            ```
+            
+            📚 **Usage:**
+            ```ruby
+            require 'kody'
+            
+            # Create eCommerce client
+            stub = Com::Kodypay::Grpc::Ecom::V1::KodyEcomPaymentsService::Stub.new(
+              'grpc-staging-ap.kodypay.com:443',
+              GRPC::Core::ChannelCredentials.new
+            )
+            
+            # Create Terminal client  
+            terminal_stub = Com::Kodypay::Grpc::Pay::V1::KodyPayTerminalService::Stub.new(
+              'grpc-staging-ap.kodypay.com:443',
+              GRPC::Core::ChannelCredentials.new
+            )
+            ```
+            
+            ✨ **What's included:**
+            - All KodyPay gRPC services (eCommerce, Terminal, Pay-at-Table, Preauth, Ordering, etc.)
+            - Generated from latest kp-protocols-clientsdk v${{ needs.tagging.outputs.version }}
+            - Full Ruby gRPC client support
+            - Real API integration tested
+            
+            📦 **Gem file:** Download attached `.gem` file for offline installation
+          draft: false
+          prerelease: ${{ needs.tagging.outputs.prerelease == 'true' }}
+          makeLatest: ${{ needs.tagging.outputs.prerelease == 'false' }}
+          artifacts: "release/*.gem"
