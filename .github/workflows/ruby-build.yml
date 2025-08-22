@@ -151,10 +151,28 @@ jobs:
           # Now install our gem locally
           gem install pkg/kody-clientsdk-ruby-*.gem --local
           
-          echo "🔬 Testing require 'kody'..."
-          ruby -e "require 'kody'; puts 'Kody::VERSION = ' + Kody::VERSION"
+          echo "🔬 Testing basic functionality..."
+          ruby -e "
+            require 'kody'
+            puts 'Kody::VERSION = ' + Kody::VERSION
+            
+            # Test configuration system
+            Kody.configure do |config|
+              config.staging_ap!
+              config.api_key = 'test-key'
+              config.store_id = 'test-store'
+            end
+            
+            puts 'Configuration endpoint: ' + Kody.configuration.endpoint
+            puts 'Configuration test passed!'
+            
+            # Test protobuf classes are available
+            puts 'eCommerce service: ' + Com::Kodypay::Grpc::Ecom::V1::KodyEcomPaymentsService.name
+            puts 'Terminal service: ' + Com::Kodypay::Grpc::Pay::V1::KodyPayTerminalService.name
+            puts 'Protobuf classes loaded successfully!'
+          "
           
-          echo "✅ Gem installation test passed!"
+          echo "✅ Gem installation and functionality test passed!"
 
       - name: Upload gem artifact
         uses: actions/upload-artifact@v4
