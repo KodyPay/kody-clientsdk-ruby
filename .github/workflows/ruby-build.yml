@@ -77,14 +77,9 @@ jobs:
         run: |
           echo "🔧 Generating gRPC files for all KodyPay services..."
           
-          # Find all .proto files automatically
-          proto_files=$(find ./proto -name "*.proto" -type f)
-          echo "📄 Found proto files:"
-          echo "$proto_files"
-          
-          # Generate all proto files at once
+          # Generate all proto files at once - use xargs to properly handle multiple files
           mkdir -p lib/generated
-          bundle exec grpc_tools_ruby_protoc -I./proto --ruby_out=./lib/generated --grpc_out=./lib/generated $proto_files
+          find ./proto -name "*.proto" -type f | xargs bundle exec grpc_tools_ruby_protoc -I./proto --ruby_out=./lib/generated --grpc_out=./lib/generated
           
           echo "📁 Moving all generated files to lib root..."
           
@@ -100,10 +95,12 @@ jobs:
             find lib/generated -name "$filename" -exec cp {} "lib/$filename" \;
           done
           
-          echo "🔧 Fixing require paths in service files..."
           # Fix all require statements to use relative paths
-          find lib -name "*_services_pb.rb" -exec sed -i -E 's|require ['"'"'"].*?/([^/'"'"'"]+)_pb['"'"'"]|require_relative "\1_pb"|g' {} \;
-          
+          echo "🔧 Fixing require paths in ALL generated files..."
+          find lib -type f \( -name "*_pb.rb" -o -name "*_services_pb.rb" \) | while read file; do
+            ruby -i -pe "gsub(/require\s+['\"](com\/kodypay\/grpc\/.*?)([^\/]+_pb)['\"]/, 'require_relative \"\2\"')" "$file"
+          done
+  
           # Clean up
           rm -rf lib/generated
           rm -rf proto
